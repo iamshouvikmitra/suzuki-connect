@@ -6,8 +6,13 @@ import com.google.android.libraries.navigation.NavigationApi
 import com.google.android.libraries.navigation.Navigator
 import com.google.android.libraries.navigation.Waypoint
 import dev.mrwick.redline.BuildConfig
+import com.google.android.gms.maps.model.LatLng
 import dev.mrwick.redline.util.AppLog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -40,6 +45,19 @@ object GoogleNavController {
     private val _pendingShare = MutableStateFlow<String?>(null)
     val pendingShare: StateFlow<String?> = _pendingShare.asStateFlow()
 
+    /** Label of the share currently being resolved (for the UI spinner), null when idle. */
+    private val _resolving = MutableStateFlow<String?>(null)
+    val resolving: StateFlow<String?> = _resolving.asStateFlow()
+
+    /** Last share / search failure message for the UI; cleared on the next attempt. */
+    private val _shareError = MutableStateFlow<String?>(null)
+    val shareError: StateFlow<String?> = _shareError.asStateFlow()
+
+    // Main-thread scope owned by the process, not by any composable: a share
+    // resolution must survive recomposition / screen recreation, and Navigator
+    // calls need the main thread.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     @Volatile private var navigator: Navigator? = null
     private var arrivalListener: Navigator.ArrivalListener? = null
     private var routeChangedListener: Navigator.RouteChangedListener? = null
@@ -54,6 +72,46 @@ object GoogleNavController {
     }
 
     fun consumePendingShare(): String? = _pendingShare.value.also { _pendingShare.value = null }
+
+    /**
+     * Resolve shared text (Maps link, geo URI, plain place name) to a destination
+     * and compute the route. Runs in the controller's scope so UI lifecycle
+     * events cannot cancel it half-way (which previously left "Finding…" stuck).
+     */
+    fun resolveShare(text: String, resolver: SharedLinkResolver, near: LatLng?) {
+        scope.launch {
+            _shareError.value = null
+            val target = SharedLinkParser.parseSharedText(text)
+            if (target == null) { _shareError.value = "That share didn't contain a location."; return@launch }
+            _resolving.value = shareLabel(text, target)
+            try {
+                when (val r = resolver.resolve(target, near)) {
+                    is SharedLinkResolver.Result.Ok -> setDestination(r.destination)
+                    is SharedLinkResolver.Result.Failed -> _shareError.value = r.reason
+                }
+            } catch (t: Throwable) {
+                AppLog.w(TAG, "resolveShare failed: ${t.message}")
+                _shareError.value = "Couldn't open that place (${t.message ?: "unknown error"})."
+            } finally {
+                _resolving.value = null
+            }
+        }
+    }
+
+    fun reportError(message: String) { _shareError.value = message }
+    fun clearShareError() { _shareError.value = null }
+
+    /** Human label for the spinner: the place name line of a Maps share, never the raw URL. */
+    private fun shareLabel(text: String, target: LinkTarget): String {
+        val nameLine = text.lines().map { it.trim() }
+            .firstOrNull { it.isNotBlank() && SharedLinkParser.extractUrl(it) == null && !it.startsWith("geo:", true) }
+        return when {
+            nameLine != null -> nameLine.take(48)
+            target is LinkTarget.Query -> target.query.take(48)
+            target is LinkTarget.Coordinates && target.label != null -> target.label.take(48)
+            else -> "shared place"
+        }
+    }
 
     /**
      * Idempotent. Shows the SDK's terms-of-service dialog on first use, then

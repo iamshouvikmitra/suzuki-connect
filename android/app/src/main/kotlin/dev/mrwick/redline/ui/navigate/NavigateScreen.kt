@@ -23,6 +23,12 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -38,8 +44,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -135,23 +139,19 @@ fun NavigateScreen(onBack: () -> Unit) {
 
     val search = remember(ctx) { DestinationSearch(ctx.applicationContext) }
     val resolver = remember(search) { SharedLinkResolver(search) }
-    var resolvingShare by remember { mutableStateOf<String?>(null) }
-    var shareError by remember { mutableStateOf<String?>(null) }
+    val resolvingShare by GoogleNavController.resolving.collectAsStateWithLifecycle()
+    val shareError by GoogleNavController.shareError.collectAsStateWithLifecycle()
 
-    // --- Consume a shared link once the navigator is ready ---
-    LaunchedEffect(pendingShare, state) {
-        val text = pendingShare ?: return@LaunchedEffect
-        if (state !is State.Ready && state !is State.RoutePreview && state !is State.Guiding && state !is State.Error) return@LaunchedEffect
-        GoogleNavController.consumePendingShare()
-        val target = SharedLinkParser.parseSharedText(text)
-        if (target == null) { shareError = "That share didn't contain a location."; return@LaunchedEffect }
-        resolvingShare = text.lines().firstOrNull { it.isNotBlank() }?.take(60) ?: "shared link"
-        shareError = null
-        when (val r = resolver.resolve(target, lastKnownLatLng(ctx))) {
-            is SharedLinkResolver.Result.Ok -> GoogleNavController.setDestination(r.destination)
-            is SharedLinkResolver.Result.Failed -> shareError = r.reason
+    // --- Hand a shared link to the controller once the navigator is usable ---
+    // Keyed on a stable Boolean (not the whole state) and doing no async work
+    // here, so consuming the share can't cancel its own resolution.
+    val navUsable = state is State.Ready || state is State.RoutePreview || state is State.Guiding || state is State.Error
+    LaunchedEffect(pendingShare, navUsable) {
+        if (pendingShare != null && navUsable) {
+            GoogleNavController.consumePendingShare()?.let { text ->
+                GoogleNavController.resolveShare(text, resolver, lastKnownLatLng(ctx))
+            }
         }
-        resolvingShare = null
     }
 
     // --- Search box state ---
@@ -176,35 +176,51 @@ fun NavigateScreen(onBack: () -> Unit) {
         }
     }
 
+    val guiding = state is State.Guiding
+    val submitTypedQuery: () -> Unit = {
+        val q = query.trim()
+        if (q.isNotEmpty()) {
+            query = ""; suggestions = emptyList()
+            GoogleNavController.submitShare(q) // plain text → Places text search via the share path
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(GixxerTokens.bg)) {
         NavigationMap(Modifier.fillMaxSize())
 
-        // Top bar: back + search
-        Column(Modifier.fillMaxWidth().statusBarsPadding().padding(12.dp)) {
+        // Top bar: back + search. Hidden while guiding so it never sits over the
+        // SDK's own instruction header; Back moves down beside Stop.
+        if (!guiding) Column(Modifier.fillMaxWidth().statusBarsPadding().padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(shape = RoundedCornerShape(14.dp), color = GixxerTokens.surface.copy(alpha = 0.92f)) {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = GixxerTokens.textPrimary) }
                 }
                 Spacer(Modifier.width(8.dp))
                 if (showSearch) {
-                    Surface(shape = RoundedCornerShape(14.dp), color = GixxerTokens.surface.copy(alpha = 0.92f), modifier = Modifier.weight(1f)) {
-                        TextField(
-                            value = query,
-                            onValueChange = { query = it },
-                            singleLine = true,
-                            placeholder = { Text("Search a place or paste a Maps link", color = GixxerTokens.textMuted) },
-                            leadingIcon = { Icon(Icons.Default.Search, null, tint = GixxerTokens.textMuted) },
-                            trailingIcon = {
-                                if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(Icons.Default.Close, "Clear", tint = GixxerTokens.textMuted) }
-                            },
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
-                                focusedTextColor = GixxerTokens.textPrimary, unfocusedTextColor = GixxerTokens.textPrimary,
-                                cursorColor = GixxerTokens.accent,
-                            ),
-                            modifier = Modifier.fillMaxWidth().focusRequester(searchFocus),
-                        )
+                    Surface(shape = RoundedCornerShape(14.dp), color = GixxerTokens.surface.copy(alpha = 0.92f), modifier = Modifier.weight(1f).height(48.dp)) {
+                        Row(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Search, null, tint = GixxerTokens.textMuted, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(10.dp))
+                            Box(Modifier.weight(1f)) {
+                                if (query.isEmpty()) Text(
+                                    "Where to?", color = GixxerTokens.textMuted, style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                                BasicTextField(
+                                    value = query,
+                                    onValueChange = { query = it.replace("\n", " ") },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = GixxerTokens.textPrimary),
+                                    cursorBrush = SolidColor(GixxerTokens.accent),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(onSearch = { submitTypedQuery() }),
+                                    modifier = Modifier.fillMaxWidth().focusRequester(searchFocus),
+                                )
+                            }
+                            if (query.isNotEmpty()) IconButton(onClick = { query = "" }, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.Close, "Clear", tint = GixxerTokens.textMuted, modifier = Modifier.size(18.dp))
+                            }
+                        }
                     }
                 }
             }
@@ -231,7 +247,7 @@ fun NavigateScreen(onBack: () -> Unit) {
                                     query = ""; suggestions = emptyList()
                                     scope.launch {
                                         val d = search.fetch(s.placeId, s.primary)
-                                        if (d != null) GoogleNavController.setDestination(d) else shareError = "Couldn't load that place."
+                                        if (d != null) GoogleNavController.setDestination(d) else GoogleNavController.reportError("Couldn't load that place.")
                                     }
                                 }.padding(horizontal = 14.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -263,7 +279,7 @@ fun NavigateScreen(onBack: () -> Unit) {
                         if (s.recoverable) OutlinedButton(onClick = { GoogleNavController.clearError(); activity?.let { GoogleNavController.init(it) } }) { Text("Retry") }
                     }
                     State.Ready -> {
-                        if (resolvingShare != null) StatusLine("Finding “$resolvingShare”…", spinner = true)
+                        if (resolvingShare != null) StatusLine("Finding $resolvingShare…", spinner = true)
                         else Text("Search above, or share a place from Google Maps to REDLINE.", color = GixxerTokens.textMuted, style = MaterialTheme.typography.bodyMedium)
                     }
                     is State.Routing -> StatusLine("Routing to ${s.destination.label}…", spinner = true)
@@ -288,11 +304,17 @@ fun NavigateScreen(onBack: () -> Unit) {
                             Text("Next in $toStep$road", color = GixxerTokens.textPrimary, style = MaterialTheme.typography.bodyMedium)
                             Text("$toDest · $mins remaining · cluster ${if (GoogleNavSource.frame.value != null) "live" else "idle"}", color = GixxerTokens.textMuted, style = MaterialTheme.typography.bodySmall)
                         }
-                        Button(
-                            onClick = { GoogleNavController.stopGuidance() },
-                            colors = ButtonDefaults.buttonColors(containerColor = GixxerTokens.danger, contentColor = Color.White),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("STOP NAVIGATION", fontWeight = FontWeight.Bold) }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedButton(onClick = onBack, modifier = Modifier.height(44.dp)) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = GixxerTokens.textPrimary, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp)); Text("BACK", color = GixxerTokens.textPrimary)
+                            }
+                            Button(
+                                onClick = { GoogleNavController.stopGuidance() },
+                                colors = ButtonDefaults.buttonColors(containerColor = GixxerTokens.danger, contentColor = Color.White),
+                                modifier = Modifier.weight(1f).height(44.dp),
+                            ) { Text("STOP NAVIGATION", fontWeight = FontWeight.Bold) }
+                        }
                     }
                 }
                 shareError?.let { Text(it, color = GixxerTokens.warning, style = MaterialTheme.typography.bodySmall) }

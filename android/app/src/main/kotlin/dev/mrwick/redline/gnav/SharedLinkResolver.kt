@@ -54,13 +54,15 @@ class SharedLinkResolver(
     suspend fun expand(shortUrl: String): String? = withContext(Dispatchers.IO) {
         try {
             val req = Request.Builder().url(shortUrl)
-                // Desktop UA: with a mobile UA Google serves an app-link page instead of the full /maps/place URL.
-                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+                // Android/mobile UA: maps.app.goo.gl only 302s to the full
+                // /maps/place/... URL for mobile clients; a desktop UA gets a 200
+                // interstitial with no redirect, which left shares unresolvable.
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36")
                 .get().build()
             client.newCall(req).execute().use { resp ->
                 val finalUrl = resp.request.url.toString()
-                AppLog.i(TAG, "expanded short link -> ${finalUrl.take(160)}")
-                finalUrl
+                AppLog.i(TAG, "expanded short link (${resp.code}) -> ${finalUrl.take(160)}")
+                if (finalUrl.substringBefore('?') == shortUrl.substringBefore('?')) null else finalUrl
             }
         } catch (t: Throwable) {
             AppLog.w(TAG, "expand failed: ${t.message}")

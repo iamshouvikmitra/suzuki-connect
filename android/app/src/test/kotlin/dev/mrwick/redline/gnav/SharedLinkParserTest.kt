@@ -21,6 +21,15 @@ class SharedLinkParserTest {
         assertEquals("Third Wave Coffee", t.label)
     }
 
+    @Test fun `expanded share with only an ftid and address falls back to an address Query`() {
+        // Real shape produced by maps.app.goo.gl for a business share (no !3d/!4d, no ChIJ).
+        val url = "https://www.google.com/maps/place/No+526,+BHARAT+TOYOTA,+Sri+Hari+Nivas,+529,+100+Feet+Rd,+Domlur,+Bengaluru,+Karnataka+560071/data=!4m2!3m1!1s0x3bae150056df5aa3:0xf5812e0477d93c4d!18m1!1e1?utm_source=mstt_1&entry=gps"
+        assertEquals(
+            LinkTarget.Query("No 526, BHARAT TOYOTA, Sri Hari Nivas, 529, 100 Feet Rd, Domlur, Bengaluru, Karnataka 560071"),
+            SharedLinkParser.parseUrl(url),
+        )
+    }
+
     @Test fun `q param with coordinates`() {
         val t = SharedLinkParser.parseUrl("https://maps.google.com/?q=12.9716,77.5946") as LinkTarget.Coordinates
         assertEquals(12.9716, t.lat, 1e-9); assertEquals(77.5946, t.lng, 1e-9)
