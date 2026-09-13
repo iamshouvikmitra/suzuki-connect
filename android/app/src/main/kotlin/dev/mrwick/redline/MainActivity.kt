@@ -76,6 +76,35 @@ import kotlinx.coroutines.launch
  */
 class MainActivity : AppCompatActivity() {
 
+    /**
+     * A place shared to REDLINE (share sheet text/plain, or a Google Maps / geo:
+     * link opened with the app) is handed to GoogleNavController; AppShell sees
+     * the pending share and opens the Navigate screen, which resolves it.
+     */
+    private fun handleNavIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        val text: String? = when (intent.action) {
+            android.content.Intent.ACTION_SEND ->
+                intent.getStringExtra(android.content.Intent.EXTRA_TEXT)
+                    ?: intent.getStringExtra(android.content.Intent.EXTRA_SUBJECT)
+            android.content.Intent.ACTION_VIEW -> intent.dataString
+            else -> null
+        }
+        if (!text.isNullOrBlank()) {
+            dev.mrwick.redline.gnav.GoogleNavController.submitShare(text)
+            // Neutralise so a config-change recreation doesn't re-submit it.
+            intent.action = android.content.Intent.ACTION_MAIN
+            intent.replaceExtras(null as Bundle?)
+            intent.data = null
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNavIntent(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // PERF / correctness: declare edge-to-edge BEFORE super.onCreate so the
         // system handles status + navigation bar layout instead of the app
@@ -84,6 +113,7 @@ class MainActivity : AppCompatActivity() {
         // window inset recomputations on background/foreground transitions.
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) handleNavIntent(intent)
         // NB: we deliberately do NOT request permissions or start the BLE
         // foreground service here. On a fresh install BLUETOOTH_CONNECT isn't
         // granted yet, and starting a `connectedDevice` foreground service
@@ -267,6 +297,15 @@ private fun AppShell() {
         }
     }
 
+    // Shared place (share sheet / Maps link) → open the Navigate screen, which
+    // consumes GoogleNavController.pendingShare and routes to it.
+    val pendingShare by dev.mrwick.redline.gnav.GoogleNavController.pendingShare.collectAsState()
+    LaunchedEffect(pendingShare) {
+        if (pendingShare != null && currentRoute != "navigate") {
+            nav.navigate("navigate") { launchSingleTop = true }
+        }
+    }
+
     // Root-level back handler: when we're on the Home tab, "back" should minimise
     // the app (moveTaskToBack) rather than call finish(). This keeps BikeBridgeService
     // alive in the background and avoids the Suzuki Connect-style "exit?" UX.
@@ -336,20 +375,7 @@ private fun AppShell() {
                                 restoreState = true
                             }
                         },
-                        onOpenNav = {
-                            // Launch Google Maps with no specific destination — opens
-                            // the app to its main screen so the rider can search /
-                            // navigate. Falls back to a generic geo: intent if Maps
-                            // isn't installed (other map apps will handle it).
-                            val launchMaps = ctx.packageManager.getLaunchIntentForPackage("com.google.android.apps.maps")
-                            val intent = launchMaps ?: android.content.Intent(
-                                android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse("geo:0,0?q="),
-                            )
-                            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                            try { ctx.startActivity(intent) }
-                            catch (_: android.content.ActivityNotFoundException) { /* no map app installed */ }
-                        },
+                        onOpenNav = { nav.navigate("navigate") },
                         onOpenMaintenance = {
                             nav.navigate(Tab.Settings.route) {
                                 popUpTo(Tab.Home.route) { saveState = true }
@@ -442,6 +468,9 @@ private fun AppShell() {
                     InspectorScreen(vm)
                 }
                 composable("diagnostics") { DiagnosticsScreen() }
+                composable("navigate") {
+                    dev.mrwick.redline.ui.navigate.NavigateScreen(onBack = { nav.popBackStack() })
+                }
                 // PARKED (2026-06-04): maneuver/cluster-byte sweep is a navigation dev tool — shelved.
                 composable("maneuver-sweep") { dev.mrwick.redline.ui.dev.ManeuverSweepScreen() }
                 composable("weather-sweep") { dev.mrwick.redline.ui.dev.WeatherSweepScreen() }

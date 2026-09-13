@@ -13,6 +13,21 @@ object TelemetryRepository {
     private val _latest = MutableStateFlow<TelemetryFrame?>(null)
     val latest: StateFlow<TelemetryFrame?> = _latest.asStateFlow()
 
+    /** Wall-clock millis of the last [update]; 0 when nothing has arrived or after [reset]. */
+    @Volatile var lastUpdateMillis: Long = 0L
+        private set
+
+    /**
+     * True while BikeBridgeService's DemoTelemetrySource is feeding synthetic
+     * frames. Consumers that drive rider-facing behaviour off speed (the
+     * active-ride overlay) must ignore demo data.
+     */
+    @Volatile var demoActive: Boolean = false
+
+    /** True when the latest frame is younger than [maxAgeMs]. */
+    fun isFresh(maxAgeMs: Long, now: Long = System.currentTimeMillis()): Boolean =
+        _latest.value != null && now - lastUpdateMillis <= maxAgeMs
+
     private val _history = MutableStateFlow<List<TelemetryFrame>>(emptyList())
     /** Rolling window of the last 60 frames (~5 min at 5s cadence). */
     val history: StateFlow<List<TelemetryFrame>> = _history.asStateFlow()
@@ -25,6 +40,7 @@ object TelemetryRepository {
     private val historyBuffer: ArrayDeque<TelemetryFrame> = ArrayDeque(HISTORY_SIZE)
 
     fun update(frame: TelemetryFrame) {
+        lastUpdateMillis = System.currentTimeMillis()
         _latest.value = frame
         synchronized(this) {
             if (historyBuffer.size >= HISTORY_SIZE) historyBuffer.removeFirst()
@@ -40,6 +56,7 @@ object TelemetryRepository {
     }
 
     fun reset() {
+        lastUpdateMillis = 0L
         _latest.value = null
         synchronized(this) {
             historyBuffer.clear()

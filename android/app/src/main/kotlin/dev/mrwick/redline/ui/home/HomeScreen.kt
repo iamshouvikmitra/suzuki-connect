@@ -123,6 +123,8 @@ fun HomeContent(
     ) {
         TopStatusZone(connectionState, riderName)
 
+        WhereToBar(onOpenNav = onOpenNav)
+
         if (live) {
             RangeHero(rangeKm = fuelEstimate?.rangeKm, fuelBars = telemetry?.fuelBars, index = 0)
         } else {
@@ -153,6 +155,59 @@ fun HomeContent(
         TodayStrip(todayKm, streak, index = 4)
 
         QuickActions(onOpenNav, onStartRide, onOpenPairing)
+    }
+}
+
+/**
+ * Uber/Tesla-style "Where to?" entry point at the top of Home. Tapping the bar
+ * opens in-app Google navigation with the search box focused; the Home / Work
+ * chips (Settings → quick destinations) route straight to the saved address.
+ */
+@Composable
+private fun WhereToBar(onOpenNav: () -> Unit) {
+    val ctx = LocalContext.current
+    val quick = androidx.compose.runtime.remember(ctx) { dev.mrwick.redline.data.QuickDestinations(ctx.applicationContext) }
+    val home by quick.home.collectAsStateWithLifecycle(initialValue = null)
+    val work by quick.work.collectAsStateWithLifecycle(initialValue = null)
+    val go: (String) -> Unit = { address ->
+        dev.mrwick.redline.gnav.GoogleNavController.submitShare(address)
+        onOpenNav()
+    }
+    BentoTile(
+        modifier = Modifier.fillMaxWidth(),
+        animateEntry = false,
+        cornerRadius = 16.dp,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+        onClick = onOpenNav,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(GixxerIcons.ManeuverStraight, contentDescription = null, tint = GixxerBrand.accent, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "Where to?",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.weight(1f),
+            )
+            if (home != null) QuickChip("HOME") { go(home!!) }
+            if (work != null) { Spacer(Modifier.width(8.dp)); QuickChip("WORK") { go(work!!) } }
+        }
+    }
+}
+
+@Composable
+private fun QuickChip(label: String, onClick: () -> Unit) {
+    androidx.compose.material3.Surface(
+        onClick = onClick,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(999.dp),
+        color = GixxerBrand.accent.copy(alpha = 0.14f),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = GixxerBrand.accent,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        )
     }
 }
 

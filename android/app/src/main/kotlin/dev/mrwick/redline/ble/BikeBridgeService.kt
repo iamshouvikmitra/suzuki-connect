@@ -27,9 +27,8 @@ import dev.mrwick.redline.data.Greetings
 import dev.mrwick.redline.data.RideStore
 import dev.mrwick.redline.data.Settings
 import dev.mrwick.redline.location.RideLocationTracker
+import dev.mrwick.redline.gnav.GoogleNavSource
 import dev.mrwick.redline.nav.IdleClockGenerator
-// PARKED: Google Maps nav shelved — MapsNavSource no longer wired into NavMux.
-// import dev.mrwick.redline.nav.MapsNavSource
 import dev.mrwick.redline.nav.NavMux
 import dev.mrwick.redline.nav.WelcomeFrame
 import dev.mrwick.redline.notifications.NowPlayingProvider
@@ -181,9 +180,9 @@ class BikeBridgeService : LifecycleService() {
             }
         }
 
-        // NavMux normally muxes Maps nav over the idle clock, but Maps nav is
-        // PARKED (2026-06-04) — the maps slot is fed constant-null below, so only
-        // the idle producer reaches the cluster.
+        // NavMux muxes live navigation (Google Navigation SDK turn-by-turn feed
+        // via GoogleNavSource) over the idle clock. When no guidance is running
+        // the nav slot is null and only the idle producer reaches the cluster.
         //
         // Idle producer rotates every CYCLE_SECONDS=5 ticks (= 5s @ 1Hz):
         //   slot CLOCK      -> clock + weather (always present)
@@ -258,14 +257,12 @@ class BikeBridgeService : LifecycleService() {
                 tick++
             }
         }
-        // PARKED (2026-06-04): Google Maps navigation is shelved. The
-        // notification-scrape -> guessed-Mappls-ID pipeline produced wrong
-        // cluster arrows, so we feed NavMux a constant-null maps slot and it
-        // always falls through to the idle clock (clock / weather / now-playing
-        // are unaffected). To revive: pass `MapsNavSource.frame` here again and
-        // re-enable the Maps branch in NotificationDispatcher. The planned
-        // replacement drives nav from the Mappls Navigation SDK instead.
-        navMux = NavMux(kotlinx.coroutines.flow.flowOf(null), idleProducer)
+        // Navigation slot = Google Navigation SDK feed (gnav/). The SDK emits a
+        // structured Maneuver enum + roundabout exit count once per second, so
+        // no text guessing is involved; GoogleManeuverMap -> Mappls ID ->
+        // ManeuverMap.mapplsIdToClusterByte (OEM table) -> a531 byte 2. The old
+        // Google-Maps-notification scrape (nav/GoogleMapsParser) stays parked.
+        navMux = NavMux(GoogleNavSource.frame, idleProducer)
 
         AppGraph.bleClient = bleClient
         AppGraph.frameWriter = frameWriter
@@ -288,7 +285,17 @@ class BikeBridgeService : LifecycleService() {
         // BLE telemetry (if any) takes over via the notifications collector below.
         lifecycleScope.launch {
             settings.demoMode.distinctUntilChanged().collect { on ->
-                if (on) demoSource.start(lifecycleScope) else demoSource.stop()
+                TelemetryRepository.demoActive = on
+                if (on) {
+                    demoSource.start(lifecycleScope)
+                } else {
+                    demoSource.stop()
+                    // Drop the last synthetic frame so nothing keeps acting on a
+                    // stale demo speed (the active-ride overlay used to re-trigger
+                    // every few seconds off it). A connected bike repopulates the
+                    // repository on its next a537 within ~5 s.
+                    if (bleClient.state.value !is ConnectionState.Ready) TelemetryRepository.reset()
+                }
             }
         }
 

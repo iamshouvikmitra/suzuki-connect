@@ -18,6 +18,8 @@
     <!-- Foreground service (BLE link) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Navigation SDK runs guidance in its own location-type foreground service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
@@ -66,16 +68,60 @@
         android:fullBackupContent="false"
         tools:targetApi="34">
 
+        <!-- Google Maps Platform API key (Navigation SDK + Places). Injected from
+             android/local.properties MAPS_API_KEY at build time; see app/build.gradle.kts. -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${MAPS_API_KEY}" />
+
+        <!-- singleTask so a location shared from Google Maps / WhatsApp / a browser
+             lands in the existing REDLINE task via onNewIntent instead of stacking a
+             second MainActivity (and a second NavigationView) on the sender's task. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.Redline">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Share sheet target: "Share" from Google Maps / any app sends the
+                 place link as text/plain. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Open Google Maps links directly (user must enable "Open supported
+                 links" for REDLINE in App info on Android 12+ since these are not
+                 verified app links). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="maps.app.goo.gl" />
+                <data android:scheme="https" android:host="goo.gl" android:pathPrefix="/maps" />
+                <data android:scheme="https" android:host="maps.google.com" />
+                <data android:scheme="https" android:host="www.google.com" android:pathPrefix="/maps" />
+                <data android:scheme="https" android:host="google.com" android:pathPrefix="/maps" />
+                <data android:scheme="https" android:host="www.google.co.in" android:pathPrefix="/maps" />
+            </intent-filter>
+            <!-- geo: URIs (lat,lng or ?q=) from any app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="geo" />
+            </intent-filter>
         </activity>
+
+        <!-- Receives the Navigation SDK's once-per-second turn-by-turn feed
+             (NavInfo) and converts it to cluster frames. Bound by the SDK from
+             within our own process; not exported. -->
+        <service
+            android:name=".gnav.NavInfoReceivingService"
+            android:exported="false" />
 
         <!-- Foreground service holding the BLE link -->
         <service

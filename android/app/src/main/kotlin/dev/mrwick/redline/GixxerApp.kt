@@ -22,6 +22,20 @@ class GixxerApp : Application() {
         dev.mrwick.redline.app.AppGraph.frameStream.init(this)
         AppLog.i("App", "onCreate pid=${android.os.Process.myPid()} pkg=$packageName")
         registerNotificationChannels()
+        initPlaces()
+    }
+
+    /** Places SDK (New) for destination search; skipped when no Maps key is built in. */
+    private fun initPlaces() {
+        val key = BuildConfig.MAPS_API_KEY
+        if (key.isBlank()) { AppLog.w("App", "MAPS_API_KEY empty — in-app navigation disabled"); return }
+        try {
+            if (!com.google.android.libraries.places.api.Places.isInitialized()) {
+                com.google.android.libraries.places.api.Places.initializeWithNewPlacesApiEnabled(this, key)
+            }
+        } catch (t: Throwable) {
+            AppLog.w("App", "Places init failed: ${t.message}")
+        }
     }
 
     private fun registerNotificationChannels() {

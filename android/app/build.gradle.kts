@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -7,18 +9,34 @@ plugins {
     alias(libs.plugins.roborazzi)
 }
 
+// Google Maps Platform key (Navigation SDK + Places). Read from the gitignored
+// android/local.properties (`MAPS_API_KEY=...`) or the MAPS_API_KEY env var
+// (CI). Empty string when absent — the app then shows a "key missing" screen
+// instead of crashing at startup.
+val mapsApiKey: String = run {
+    val f = rootProject.file("local.properties")
+    val fromFile = if (f.exists()) Properties().apply { f.inputStream().use { load(it) } }.getProperty("MAPS_API_KEY") else null
+    (fromFile ?: System.getenv("MAPS_API_KEY") ?: "").trim()
+}
+
 android {
     namespace = "dev.mrwick.redline"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "dev.mrwick.redline"
         minSdk = 29           // Android 10 (covers K20 Pro on LineageOS 23 + older)
-        targetSdk = 35        // Android 15 behaviors; runs on Android 16 (API 36) too
+        targetSdk = 36        // Navigation SDK 7.x requires target API 36+
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
+        manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
+        buildConfigField("String", "MAPS_API_KEY", "\"$mapsApiKey\"")
+        // Navigation SDK ships string resources for every supported language;
+        // the app itself is English-only, so keep just "en" to trim the APK.
+        @Suppress("DEPRECATION")
+        resourceConfigurations += listOf("en")
     }
 
     buildTypes {
@@ -37,6 +55,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // Required by the Navigation SDK (java.time etc. on older API levels).
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -72,6 +92,10 @@ android {
     sourceSets["androidTest"].kotlin.srcDir("src/androidTest/kotlin")
 }
 
+configurations.all {
+    exclude(group = "com.google.android.gms", module = "play-services-maps")
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime)
@@ -103,6 +127,15 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
     implementation(libs.play.services.location)
+
+    // Google Maps Platform: in-app turn-by-turn navigation + place search.
+    // The Navigation SDK bundles its own copy of the Maps SDK, so the Play
+    // Services Maps artifact must be excluded from every configuration (see
+    // the configurations block below).
+    implementation(libs.navigation.sdk)
+    implementation(libs.places)
+    implementation(libs.kotlinx.coroutines.play.services)
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     implementation(libs.haze)
     implementation(libs.haze.materials)

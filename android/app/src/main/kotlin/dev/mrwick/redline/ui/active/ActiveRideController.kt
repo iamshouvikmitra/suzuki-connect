@@ -16,8 +16,11 @@ import kotlinx.coroutines.launch
  * Observes [TelemetryRepository.latest] and manages the active-ride overlay lifecycle:
  *
  *  - [isActive] flips to true when speed > 5 km/h for 3 consecutive seconds.
- *  - [isActive] flips to false 30 seconds after speed drops to 0 (or when
- *    [dismiss] is called, which suppresses activation until the next motion event).
+ *  - [isActive] flips to false 30 seconds after speed drops to 0, or 10 seconds
+ *    after telemetry stops arriving (bike off, BLE lost, demo mode turned off).
+ *  - [dismiss] hides it and keeps it hidden until the bike has been stopped for
+ *    10 seconds, so a tap mid-ride does not have it spring back on the next
+ *    speed reading. Demo-mode frames never activate it.
  *  - [currentSpeedKmh] mirrors the latest reported speed (null when disconnected).
  *
  * The state machine runs on a background coroutine scoped to the process — it starts
@@ -40,17 +43,23 @@ object ActiveRideController {
 
     // Internal counters for the state machine.
     // aboveThresholdTicks: consecutive ticks where speed > SPEED_THRESHOLD_KMH
-    // belowThresholdTicks: consecutive ticks where speed == 0 (after being active)
-    // dismissed: set by dismiss(); cleared on the next above-threshold event
+    // stoppedTicks: consecutive ticks with speed == 0 or no fresh telemetry
+    // dismissed: set by dismiss(); cleared only after a genuine stop (see REARM_TICKS)
     private var aboveThresholdTicks = 0
-    private var belowThresholdTicks = 0
+    private var stoppedTicks = 0
     private var dismissed = false
 
     private const val SPEED_THRESHOLD_KMH = 5
     /** Consecutive seconds above threshold before isActive flips true. */
     private const val ACTIVATE_TICKS = 3
-    /** Seconds at speed 0 before isActive flips false. */
+    /** Seconds at speed 0 (fresh telemetry) before isActive flips false. */
     private const val DEACTIVATE_TICKS = 30
+    /** Seconds without fresh telemetry before isActive flips false (bike off / BLE lost / demo off). */
+    private const val STALE_DEACTIVATE_TICKS = 10
+    /** Seconds stopped before a dismissed overlay may auto-show again on the next ride. */
+    private const val REARM_TICKS = 10
+    /** A frame older than this is treated as "no telemetry" — a537 arrives every ~5 s. */
+    private const val FRESH_MS = 15_000L
     /** Polling cadence for the state-machine loop (ms). */
     private const val TICK_MS = 1_000L
 
@@ -59,40 +68,34 @@ object ActiveRideController {
             // Tick loop: poll TelemetryRepository.latest every second and
             // advance the state machine.
             while (true) {
-                val frame = TelemetryRepository.latest.value
+                val fresh = TelemetryRepository.isFresh(FRESH_MS)
+                val frame = if (fresh) TelemetryRepository.latest.value else null
                 val speed = frame?.speedKmh ?: 0
+                // Demo mode synthesises a sweeping speed; it must never pop the
+                // rider-facing overlay.
+                val eligible = fresh && !TelemetryRepository.demoActive
 
                 _currentSpeedKmh.value = frame?.speedKmh
 
                 when {
-                    // Speed above threshold: count up toward activation
-                    speed > SPEED_THRESHOLD_KMH -> {
-                        belowThresholdTicks = 0
+                    // Moving (real, fresh telemetry): count toward activation.
+                    eligible && speed > SPEED_THRESHOLD_KMH -> {
+                        stoppedTicks = 0
                         aboveThresholdTicks++
-                        if (aboveThresholdTicks >= ACTIVATE_TICKS) {
-                            if (dismissed) {
-                                // New motion after dismiss — clear the dismissed flag
-                                // so the next ACTIVATE_TICKS streak can re-arm.
-                                dismissed = false
-                            }
-                            if (!dismissed && !_isActive.value) {
-                                _isActive.value = true
-                            }
+                        if (aboveThresholdTicks >= ACTIVATE_TICKS && !dismissed && !_isActive.value) {
+                            _isActive.value = true
                         }
                     }
-                    // Speed at 0 while active: count down toward deactivation
-                    speed == 0 && _isActive.value -> {
-                        aboveThresholdTicks = 0
-                        belowThresholdTicks++
-                        if (belowThresholdTicks >= DEACTIVATE_TICKS) {
-                            _isActive.value = false
-                            belowThresholdTicks = 0
-                        }
-                    }
-                    // Speed at 0 while inactive — just reset counters
+                    // Stopped or no usable telemetry: count toward deactivation / re-arm.
                     else -> {
                         aboveThresholdTicks = 0
-                        belowThresholdTicks = 0
+                        stoppedTicks++
+                        val limit = if (fresh) DEACTIVATE_TICKS else STALE_DEACTIVATE_TICKS
+                        if (_isActive.value && stoppedTicks >= limit) _isActive.value = false
+                        // A dismissed overlay re-arms only after the bike has actually
+                        // stopped for a while — not on the next speed blip, which is
+                        // what made it reappear every few seconds mid-ride.
+                        if (dismissed && stoppedTicks >= REARM_TICKS) dismissed = false
                     }
                 }
 
@@ -111,6 +114,6 @@ object ActiveRideController {
         dismissed = true
         _isActive.value = false
         aboveThresholdTicks = 0
-        belowThresholdTicks = 0
+        stoppedTicks = 0
     }
 }
